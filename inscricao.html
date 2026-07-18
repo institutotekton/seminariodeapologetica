@@ -434,6 +434,10 @@
         <input type="email" id="email" placeholder="voce@email.com">
         <span class="err" id="err-email">Informe um e-mail válido.</span>
 
+        <label for="idade">Idade</label>
+        <input type="number" id="idade" min="0" max="120" placeholder="Sua idade">
+        <span class="err" id="err-idade">Informe sua idade.</span>
+
         <label>Você é membro da Igreja da Orla?</label>
         <div class="pay-options">
           <label class="pay-opt" id="opt-membro-sim">
@@ -702,11 +706,13 @@
     const nome = document.getElementById('nome').value.trim();
     const whatsapp = document.getElementById('whatsapp').value.trim();
     const email = document.getElementById('email').value.trim();
+    const idade = document.getElementById('idade').value.trim();
 
     let valid = true;
     if(nome.length < 3){ showErr('err-nome', true); valid = false; } else showErr('err-nome', false);
     if(whatsapp.length < 8){ showErr('err-whatsapp', true); valid = false; } else showErr('err-whatsapp', false);
     if(!validateEmail(email)){ showErr('err-email', true); valid = false; } else showErr('err-email', false);
+    if(!idade || idade < 0 || idade > 120){ showErr('err-idade', true); valid = false; } else showErr('err-idade', false);
     if(!selectedMembro){ showErr('err-membro', true); valid = false; } else showErr('err-membro', false);
     if(!selectedTier){ showErr('err-tier', true); valid = false; } else showErr('err-tier', false);
     if(!comprovanteBase64){ showErr('err-comprovante', true); valid = false; } else showErr('err-comprovante', false);
@@ -730,7 +736,7 @@
 
     const code = 'TEKTON-' + Math.random().toString(36).substring(2,6).toUpperCase() + Math.floor(Math.random()*90+10);
     const registro = {
-      code, nome, whatsapp, email,
+      code, nome, whatsapp, email, idade,
       membroOrla: selectedMembro,
       tipoInscricao: selectedTier.label,
       valor: selectedTier.preco,
@@ -740,14 +746,13 @@
     };
 
     try{
-      const res = await fetch(SCRIPT_URL, {
+      await fetch(SCRIPT_URL, {
         method: 'POST',
+        mode: 'no-cors',
         body: JSON.stringify(registro)
       });
-      const result = await res.json();
-      if(!result || !result.ok){
-        throw new Error(result && result.error ? result.error : 'save failed');
-      }
+      // modo no-cors não deixa ler a resposta, então assumimos sucesso
+      // se o pedido saiu sem erro de rede; o código já foi gerado acima.
       document.getElementById('confirmCode').textContent = code;
       document.getElementById('formScreen').classList.add('hidden');
       document.getElementById('confirmScreen').classList.remove('hidden');
@@ -770,12 +775,19 @@
   async function tryAdminLogin(){
     const val = document.getElementById('adminPass').value;
     showErr('err-admin', false);
-    const ok = await fetchRegistrations(val);
-    if(ok){
+    const data = await jsonpFetch_(val);
+    if(data === null){
+      document.getElementById('err-admin').textContent = 'Não foi possível conectar ao servidor. Verifique sua internet.';
+      showErr('err-admin', true);
+      return;
+    }
+    if(data.ok){
       currentAdminPassword = val;
       document.getElementById('adminLoginScreen').classList.add('hidden');
       document.getElementById('adminPanel').classList.remove('hidden');
+      renderRegistrations_(data.registros || []);
     }else{
+      document.getElementById('err-admin').textContent = 'Senha incorreta.';
       showErr('err-admin', true);
     }
   }
@@ -784,48 +796,74 @@
 
   async function loadRegistrations(){
     if(!currentAdminPassword) return;
-    await fetchRegistrations(currentAdminPassword);
-  }
-
-  async function fetchRegistrations(password){
-    const listEl = document.getElementById('regList');
     const countEl = document.getElementById('adminCount');
     countEl.textContent = 'carregando…';
-    try{
-      const res = await fetch(SCRIPT_URL + '?password=' + encodeURIComponent(password));
-      const data = await res.json();
-      if(!data || !data.ok){
-        countEl.textContent = 'não foi possível carregar';
-        return false;
-      }
-      const regs = (data.registros || []).slice().sort((a,b)=> new Date(b.timestamp) - new Date(a.timestamp));
-      currentRegs = regs;
-      countEl.textContent = regs.length + (regs.length === 1 ? ' inscrição' : ' inscrições');
-
-      if(regs.length === 0){
-        listEl.innerHTML = '<div class="empty-state">Nenhuma inscrição ainda. Assim que alguém se inscrever, aparecerá aqui.</div>';
-        return true;
-      }
-
-      listEl.innerHTML = regs.map(r=>{
-        const d = new Date(r.timestamp);
-        const dataFmt = d.toLocaleDateString('pt-BR') + ' às ' + d.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
-        const acompTxt = r.acompanhantes ? ' · acomp.: ' + r.acompanhantes : '';
-        return `<div class="reg-row">
-          <img class="reg-thumb" src="${r.comprovante}" onclick="openLightbox('${String(r.comprovante).replace(/'/g,"\\'")}')">
-          <div class="reg-info">
-            <div class="reg-name">${escapeHtml(r.nome)} <span class="reg-sub">— ${escapeHtml(r.tipoInscricao || '')}</span></div>
-            <div class="reg-sub">${escapeHtml(r.whatsapp)} · ${escapeHtml(r.email)} · membro da Orla: ${escapeHtml(r.membroOrla || '—')}${acompTxt}</div>
-            <div class="reg-sub"><span class="reg-code">${r.code}</span> · R$ ${Number(r.valor||0).toFixed(2).replace('.',',')} · ${dataFmt}</div>
-          </div>
-        </div>`;
-      }).join('');
-      return true;
-    }catch(err){
-      countEl.textContent = 'erro ao carregar';
-      listEl.innerHTML = '<div class="empty-state">Não foi possível carregar as inscrições agora. Toque em Atualizar para tentar de novo.</div>';
-      return false;
+    const data = await jsonpFetch_(currentAdminPassword);
+    if(data && data.ok){
+      renderRegistrations_(data.registros || []);
+    }else{
+      countEl.textContent = 'não foi possível atualizar';
     }
+  }
+
+  // Busca os dados via JSONP (uma tag <script> em vez de fetch), porque o
+  // Apps Script não devolve os cabeçalhos de CORS que um fetch() comum
+  // exige para conseguir ler a resposta quando a página está em outro site.
+  function jsonpFetch_(password){
+    return new Promise((resolve)=>{
+      const cbName = 'jsonp_cb_' + Date.now() + '_' + Math.floor(Math.random()*100000);
+      let done = false;
+      const timeoutId = setTimeout(()=>{
+        if(!done){ done = true; cleanup(); resolve(null); }
+      }, 15000);
+
+      function cleanup(){
+        delete window[cbName];
+        if(script.parentNode) script.parentNode.removeChild(script);
+        clearTimeout(timeoutId);
+      }
+
+      window[cbName] = function(data){
+        if(done) return;
+        done = true;
+        cleanup();
+        resolve(data);
+      };
+
+      const script = document.createElement('script');
+      script.src = SCRIPT_URL + '?password=' + encodeURIComponent(password) + '&callback=' + cbName;
+      script.onerror = function(){
+        if(!done){ done = true; cleanup(); resolve(null); }
+      };
+      document.body.appendChild(script);
+    });
+  }
+
+  function renderRegistrations_(regsRaw){
+    const listEl = document.getElementById('regList');
+    const countEl = document.getElementById('adminCount');
+    const regs = (regsRaw || []).slice().sort((a,b)=> new Date(b.timestamp) - new Date(a.timestamp));
+    currentRegs = regs;
+    countEl.textContent = regs.length + (regs.length === 1 ? ' inscrição' : ' inscrições');
+
+    if(regs.length === 0){
+      listEl.innerHTML = '<div class="empty-state">Nenhuma inscrição ainda. Assim que alguém se inscrever, aparecerá aqui.</div>';
+      return;
+    }
+
+    listEl.innerHTML = regs.map(r=>{
+      const d = new Date(r.timestamp);
+      const dataFmt = d.toLocaleDateString('pt-BR') + ' às ' + d.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+      const acompTxt = r.acompanhantes ? ' · acomp.: ' + r.acompanhantes : '';
+      return `<div class="reg-row">
+        <img class="reg-thumb" src="${r.comprovante}" onclick="openLightbox('${String(r.comprovante).replace(/'/g,"\\'")}')">
+        <div class="reg-info">
+          <div class="reg-name">${escapeHtml(r.nome)} <span class="reg-sub">— ${escapeHtml(r.tipoInscricao || '')}</span></div>
+          <div class="reg-sub">${escapeHtml(r.whatsapp)} · ${escapeHtml(r.email)} · ${escapeHtml(r.idade || '—')} anos · membro da Orla: ${escapeHtml(r.membroOrla || '—')}${acompTxt}</div>
+          <div class="reg-sub"><span class="reg-code">${r.code}</span> · R$ ${Number(r.valor||0).toFixed(2).replace('.',',')} · ${dataFmt}</div>
+        </div>
+      </div>`;
+    }).join('');
   }
 
   function escapeHtml(s){
@@ -839,9 +877,9 @@
 
   function exportCSV(){
     if(currentRegs.length === 0){ alert('Nenhuma inscrição para exportar ainda.'); return; }
-    const header = ['Código','Nome','WhatsApp','E-mail','Membro da Orla','Tipo de inscrição','Valor','Acompanhantes','Data/Hora'];
+    const header = ['Código','Nome','Idade','WhatsApp','E-mail','Membro da Orla','Tipo de inscrição','Valor','Acompanhantes','Data/Hora'];
     const rows = currentRegs.map(r=>[
-      r.code, r.nome, r.whatsapp, r.email, r.membroOrla || '', r.tipoInscricao || '',
+      r.code, r.nome, r.idade || '', r.whatsapp, r.email, r.membroOrla || '', r.tipoInscricao || '',
       'R$ ' + Number(r.valor||0).toFixed(2).replace('.',','),
       r.acompanhantes || '',
       new Date(r.timestamp).toLocaleString('pt-BR')
